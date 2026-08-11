@@ -1,4 +1,4 @@
-"""Ядро виртуального дракона-питомца с уровнями, эволюцией, инвентарём и мини-играми."""
+"""Ядро Dragon Pet: уровни, эволюция, инвентарь, магазин, дружба и мини-игры."""
 
 from __future__ import annotations
 
@@ -29,8 +29,6 @@ def xp_for_level(level: int) -> int:
 
 @dataclass
 class DragonPet:
-    """Добрый дракон с седлом — твой личный питомец."""
-
     owner_id: int
     name: str = "Гроктар"
     species: str = "Маленький дракончик с седлом"
@@ -44,6 +42,8 @@ class DragonPet:
     xp: int = 0
     evolution_stage: int = 0
 
+    coins: int = 50  # валюта магазина
+
     habits: Dict[str, float] = field(default_factory=lambda: {
         "всегда проверяет седло": 0.75,
         "любит почесывания за ухом": 0.70,
@@ -52,13 +52,17 @@ class DragonPet:
         "собирает блестящие камушки": 0.30,
     })
 
-    # Инвентарь: item_id → количество
     inventory: Dict[str, int] = field(default_factory=dict)
+
+    # Дружба: owner_id (str) → уровень дружбы (0–100)
+    friends: Dict[str, int] = field(default_factory=dict)
 
     last_interaction: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_daily: str = ""
-    last_search: str = ""   # кулдаун поиска камушков
-    last_hunt: str = ""     # кулдаун охоты
+    last_search: str = ""
+    last_hunt: str = ""
+    last_play: str = ""
+    last_rings: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # ---------- базовые действия ----------
@@ -97,7 +101,6 @@ class DragonPet:
             return "*устало опускает крылья* Я слишком устал… дай мне отдохнуть или покорми.", False
         if self.hunger > 80:
             return "*жалобно смотрит* Сначала покорми меня, а то силы закончатся в воздухе…", False
-
         self.energy = max(0.0, self.energy - 20)
         self.happiness = min(100.0, self.happiness + 12)
         self.affection = min(100.0, self.affection + 5)
@@ -137,18 +140,18 @@ class DragonPet:
                 return "Ты уже получал ежедневную награду сегодня. Возвращайся завтра! 🌙", False, {}
 
         self.last_daily = now.isoformat()
-
         hunger_restore = 30 + self.level * 2
         happiness_boost = 15 + self.level
         energy_boost = 20 + self.level
         xp_reward = 40 + self.level * 8
+        coins_reward = 20 + self.level * 3
 
         self.hunger = max(0.0, self.hunger - hunger_restore)
         self.happiness = min(100.0, self.happiness + happiness_boost)
         self.energy = min(100.0, self.energy + energy_boost)
         self.affection = min(100.0, self.affection + 5)
+        self.coins += coins_reward
 
-        # Шанс получить предметы в daily
         daily_items = []
         if random.random() < 0.6:
             item = random.choice(["meat", "fish", "berry", "shiny_stone"])
@@ -169,19 +172,15 @@ class DragonPet:
             self._strengthen(habit, 0.15)
 
         text = (
-            f"🎁 **Ежедневная награда получена!**\n"
-            f"• −{hunger_restore} голода\n"
-            f"• +{happiness_boost} счастья\n"
-            f"• +{energy_boost} энергии\n"
-            f"• +{xp_reward} опыта"
+            f"🎁 **Ежедневная награда!**\n"
+            f"• −{hunger_restore} голода • +{happiness_boost} счастья • +{energy_boost} энергии\n"
+            f"• +{xp_reward} XP • +{coins_reward} 🪙"
         )
         if daily_items:
-            items_str = ", ".join(format_item(i, 1) for i in daily_items)
-            text += f"\n• Предметы: {items_str}"
+            text += "\n• Предметы: " + ", ".join(format_item(i, 1) for i in daily_items)
+        return text, leveled, {"xp": xp_reward, "coins": coins_reward}
 
-        return text, leveled, {"xp": xp_reward}
-
-    # ---------- инвентарь ----------
+    # ---------- инвентарь и магазин ----------
 
     def add_item(self, item_id: str, count: int = 1) -> None:
         if item_id not in ITEMS:
@@ -198,7 +197,6 @@ class DragonPet:
         return True
 
     def use_item(self, item_id: str) -> Tuple[str, bool]:
-        """Использовать / подарить предмет."""
         item = get_item(item_id)
         if not item:
             return "Такого предмета не существует.", False
@@ -219,44 +217,110 @@ class DragonPet:
         leveled = self._add_xp(xp_gain) if xp_gain else False
         self._touch()
 
-        # Особые тексты
         if item_id == "shiny_stone":
             self._strengthen("собирает блестящие камушки", 0.12)
-            text = f"*глаза вспыхивают* Ооо… блестящий! Спасибо, всадник! {item['emoji']}"
+            text = f"*глаза вспыхивают* Ооо… блестящий! Спасибо! {item['emoji']}"
         elif item_id in ("meat", "fish", "berry"):
-            text = f"*довольно ест* Ммм, {item['name']}! Спасибо 🔥"
+            text = f"*довольно ест* Ммм, {item['name']}! 🔥"
         elif item_id == "saddle_oil":
-            text = f"*довольно фыркает, пока ты натираешь седло* Теперь оно сидит ещё лучше!"
+            text = f"*довольно фыркает* Седло теперь ещё удобнее!"
+        elif item_id == "play_ball":
+            text = f"*радостно подбрасывает мяч* Давай играть! ⚽"
         else:
             text = f"Ты используешь {item['emoji']} **{item['name']}**. Эффект применён!"
-
         return text, leveled
+
+    def buy_item(self, item_id: str, count: int = 1) -> str:
+        item = get_item(item_id)
+        if not item:
+            return "Такого предмета нет в магазине."
+        price = item.get("buy_price", 0)
+        if price <= 0:
+            return f"{item['emoji']} {item['name']} нельзя купить."
+        total = price * count
+        if self.coins < total:
+            return f"Не хватает монет. Нужно {total} 🪙, у тебя {self.coins} 🪙."
+        self.coins -= total
+        self.add_item(item_id, count)
+        self._touch()
+        return f"✅ Куплено {format_item(item_id, count)} за {total} 🪙\nОсталось: {self.coins} 🪙"
+
+    def sell_item(self, item_id: str, count: int = 1) -> str:
+        item = get_item(item_id)
+        if not item:
+            return "Такого предмета не существует."
+        if not self.remove_item(item_id, count):
+            return f"У тебя нет столько {item['emoji']} {item['name']}."
+        price = item.get("sell_price", 0) * count
+        self.coins += price
+        self._touch()
+        return f"✅ Продано {format_item(item_id, count)} за {price} 🪙\nТеперь у тебя: {self.coins} 🪙"
+
+    def gift_item(self, target: "DragonPet", item_id: str) -> str:
+        item = get_item(item_id)
+        if not item:
+            return "Такого предмета нет."
+        if not self.remove_item(item_id, 1):
+            return f"У тебя нет {item['emoji']} {item['name']}."
+        target.add_item(item_id, 1)
+        # Укрепляем дружбу
+        tid = str(target.owner_id)
+        self.friends[tid] = min(100, self.friends.get(tid, 0) + 8)
+        target.friends[str(self.owner_id)] = min(100, target.friends.get(str(self.owner_id), 0) + 8)
+        self.happiness = min(100.0, self.happiness + 5)
+        target.happiness = min(100.0, target.happiness + 10)
+        self._touch()
+        target._touch()
+        return (
+            f"🎁 Ты подарил {format_item(item_id)} дракону **{target.name}**!\n"
+            f"Дружба между вами окрепла."
+        )
 
     def inventory_text(self) -> str:
         if not self.inventory:
-            return "Инвентарь пуст. Поищи камушки или сходи на охоту!"
+            return "Инвентарь пуст."
         lines = [format_item(iid, cnt) for iid, cnt in sorted(self.inventory.items())]
+        return "\n".join(lines)
+
+    # ---------- дружба ----------
+
+    def add_friend(self, other_id: int) -> str:
+        oid = str(other_id)
+        if oid == str(self.owner_id):
+            return "Нельзя добавить самого себя."
+        if oid in self.friends:
+            return "Этот дракон уже у тебя в друзьях."
+        self.friends[oid] = 10
+        self._touch()
+        return f"🤝 Дракон добавлен в друзья! Начальный уровень дружбы: 10"
+
+    def friendship_level(self, other_id: int) -> int:
+        return self.friends.get(str(other_id), 0)
+
+    def friends_text(self) -> str:
+        if not self.friends:
+            return "Пока нет друзей. Добавь кого-нибудь через `/friend @user`!"
+        lines = []
+        for oid, lvl in sorted(self.friends.items(), key=lambda x: -x[1]):
+            lines.append(f"• <@{oid}> — дружба {lvl}/100")
         return "\n".join(lines)
 
     # ---------- мини-игры ----------
 
     def can_search(self) -> Tuple[bool, str]:
         if self.energy < 15:
-            return False, "Слишком мало энергии для поиска. Покорми или отдохни."
+            return False, "Мало энергии для поиска."
         if self.last_search:
             last = datetime.fromisoformat(self.last_search)
-            delta = (datetime.now(timezone.utc) - last).total_seconds()
-            if delta < 300:  # 5 минут
-                left = int(300 - delta)
-                return False, f"Поиск ещё рано. Подожди {left} сек."
+            if (datetime.now(timezone.utc) - last).total_seconds() < 300:
+                left = int(300 - (datetime.now(timezone.utc) - last).total_seconds())
+                return False, f"Поиск на перезарядке ({left} сек)."
         return True, ""
 
     def search_stones(self) -> Tuple[str, bool, List[str]]:
-        """Мини-игра: поиск блестящих камушков."""
         ok, msg = self.can_search()
         if not ok:
             return msg, False, []
-
         self.last_search = datetime.now(timezone.utc).isoformat()
         self.energy = max(0.0, self.energy - 12)
         self.hunger = min(100.0, self.hunger + 5)
@@ -265,90 +329,129 @@ class DragonPet:
 
         found = []
         roll = random.random()
-
         if roll < 0.08:
-            self.add_item("dragon_scale", 1)
-            found.append("dragon_scale")
+            self.add_item("dragon_scale", 1); found.append("dragon_scale")
         if roll < 0.25:
-            self.add_item("shiny_stone", random.randint(1, 2))
-            found.append("shiny_stone")
+            self.add_item("shiny_stone", random.randint(1, 2)); found.append("shiny_stone")
         if roll < 0.45:
-            self.add_item("ancient_coin", 1)
-            found.append("ancient_coin")
+            self.add_item("ancient_coin", 1); found.append("ancient_coin")
+            self.coins += 8
         if roll < 0.70:
-            self.add_item("berry", 1)
-            found.append("berry")
-        if not found:
-            # утешительный приз
-            if random.random() < 0.5:
-                self.add_item("shiny_stone", 1)
-                found.append("shiny_stone")
+            self.add_item("berry", 1); found.append("berry")
+        if not found and random.random() < 0.5:
+            self.add_item("shiny_stone", 1); found.append("shiny_stone")
 
         leveled = self._add_xp(10 + len(found) * 5)
-
         if found:
-            items_str = ", ".join(format_item(i) for i in found)
-            text = f"🔍 *рыщет по земле и камням*\nНашёл: {items_str}!"
+            text = f"🔍 *рыщет*\nНашёл: {', '.join(format_item(i) for i in found)}!"
         else:
-            text = "🔍 *долго ищет, но ничего интересного* В этот раз пусто… Попробуй ещё позже."
-
+            text = "🔍 *долго ищет* В этот раз пусто…"
         return text, leveled, found
 
     def can_hunt(self) -> Tuple[bool, str]:
         if self.energy < 25:
             return False, "Мало энергии для охоты."
         if self.hunger > 85:
-            return False, "Слишком голоден, чтобы охотиться. Сначала покорми!"
+            return False, "Слишком голоден."
         if self.last_hunt:
             last = datetime.fromisoformat(self.last_hunt)
-            delta = (datetime.now(timezone.utc) - last).total_seconds()
-            if delta < 600:  # 10 минут
-                left = int(600 - delta)
-                return False, f"Охота на перезарядке. Осталось {left} сек."
+            if (datetime.now(timezone.utc) - last).total_seconds() < 600:
+                left = int(600 - (datetime.now(timezone.utc) - last).total_seconds())
+                return False, f"Охота на перезарядке ({left} сек)."
         return True, ""
 
     def hunt(self) -> Tuple[str, bool, List[str]]:
-        """Мини-игра: охота."""
         ok, msg = self.can_hunt()
         if not ok:
             return msg, False, []
-
         self.last_hunt = datetime.now(timezone.utc).isoformat()
         self.energy = max(0.0, self.energy - 22)
         self.hunger = min(100.0, self.hunger + 12)
         self._touch()
 
         found = []
-        roll = random.random()
-
-        # Успех зависит от уровня и счастья
-        success_chance = 0.55 + (self.level * 0.01) + (self.happiness / 500)
-
-        if random.random() < success_chance:
-            if roll < 0.15:
-                self.add_item("meat", random.randint(1, 2))
-                found.append("meat")
-            if roll < 0.40:
-                self.add_item("fish", random.randint(1, 2))
-                found.append("fish")
-            if roll < 0.55:
-                self.add_item("cloud_essence", 1)
-                found.append("cloud_essence")
-            if roll < 0.70:
-                self.add_item("saddle_oil", 1)
-                found.append("saddle_oil")
-            if not found:
-                self.add_item("meat", 1)
-                found.append("meat")
-
+        success = random.random() < (0.55 + self.level * 0.01 + self.happiness / 500)
+        if success:
+            roll = random.random()
+            if roll < 0.15: self.add_item("meat", random.randint(1, 2)); found.append("meat")
+            if roll < 0.40: self.add_item("fish", random.randint(1, 2)); found.append("fish")
+            if roll < 0.55: self.add_item("cloud_essence", 1); found.append("cloud_essence")
+            if roll < 0.70: self.add_item("saddle_oil", 1); found.append("saddle_oil")
+            if not found: self.add_item("meat", 1); found.append("meat")
+            self.coins += random.randint(5, 15)
             leveled = self._add_xp(18 + len(found) * 6)
-            items_str = ", ".join(format_item(i) for i in found)
-            text = f"🏹 *мощный прыжок и точный удар*\nУдачная охота! Добыча: {items_str}"
+            text = f"🏹 *точный удар*\nДобыча: {', '.join(format_item(i) for i in found)}"
         else:
             leveled = self._add_xp(6)
-            text = "🏹 *промах* Добыча ускользнула… Но опыт всё равно получен."
-
+            text = "🏹 *промах* Добыча ускользнула…"
         return text, leveled, found
+
+    def can_play(self) -> Tuple[bool, str]:
+        if self.energy < 10:
+            return False, "Слишком устал для игр."
+        if self.last_play:
+            last = datetime.fromisoformat(self.last_play)
+            if (datetime.now(timezone.utc) - last).total_seconds() < 180:
+                left = int(180 - (datetime.now(timezone.utc) - last).total_seconds())
+                return False, f"Играть можно через {left} сек."
+        return True, ""
+
+    def play(self) -> Tuple[str, bool]:
+        """Мини-игра: весёлая игра."""
+        ok, msg = self.can_play()
+        if not ok:
+            return msg, False
+        self.last_play = datetime.now(timezone.utc).isoformat()
+        self.energy = max(0.0, self.energy - 10)
+        self.happiness = min(100.0, self.happiness + 18)
+        self.affection = min(100.0, self.affection + 6)
+        self._touch()
+        self._strengthen("рычит от удовольствия", 0.06)
+        leveled = self._add_xp(14)
+        text = self._response([
+            "*радостно крутится и подпрыгивает* Это было весело! ⚽",
+            "*играючи кусает воздух* Ещё! Ещё!",
+            "*довольно фыркает* Ты лучший напарник для игр.",
+        ])
+        return text, leveled
+
+    def can_rings(self) -> Tuple[bool, str]:
+        if self.energy < 20:
+            return False, "Мало энергии для полёта сквозь кольца."
+        if self.last_rings:
+            last = datetime.fromisoformat(self.last_rings)
+            if (datetime.now(timezone.utc) - last).total_seconds() < 420:
+                left = int(420 - (datetime.now(timezone.utc) - last).total_seconds())
+                return False, f"Испытание колец на перезарядке ({left} сек)."
+        return True, ""
+
+    def fly_rings(self) -> Tuple[str, bool, int]:
+        """Мини-игра: полёт сквозь кольца. Возвращает (текст, level_up, монеты)."""
+        ok, msg = self.can_rings()
+        if not ok:
+            return msg, False, 0
+        self.last_rings = datetime.now(timezone.utc).isoformat()
+        self.energy = max(0.0, self.energy - 18)
+        self.hunger = min(100.0, self.hunger + 8)
+        self._touch()
+        self._strengthen("всегда проверяет седло", 0.05)
+
+        # Успех зависит от уровня и энергии
+        score = random.randint(3, 10) + min(5, self.level // 3)
+        coins_won = score * 3
+        xp_won = 12 + score * 2
+
+        self.coins += coins_won
+        self.happiness = min(100.0, self.happiness + score)
+        leveled = self._add_xp(xp_won)
+
+        if score >= 12:
+            text = f"🌀 *пролетает все кольца идеально!*\nНевероятный полёт! +{coins_won} 🪙 и куча опыта!"
+        elif score >= 8:
+            text = f"🌀 *ловко проходит большинство колец*\nОтличный результат! +{coins_won} 🪙"
+        else:
+            text = f"🌀 *проходит несколько колец*\nНеплохо для начала. +{coins_won} 🪙"
+        return text, leveled, coins_won
 
     # ---------- прогрессия ----------
 
@@ -361,6 +464,7 @@ class DragonPet:
             leveled = True
             self.happiness = min(100.0, self.happiness + 5)
             self.affection = min(100.0, self.affection + 3)
+            self.coins += 10
             self._check_evolution()
         return leveled
 
@@ -400,33 +504,27 @@ class DragonPet:
             "happiness": round(self.happiness),
             "energy": round(self.energy),
             "affection": round(self.affection),
+            "coins": self.coins,
             "mood": self.mood_text(),
             "habits": self.strong_habits(),
             "next_evolution": next_evo,
             "inventory_count": sum(self.inventory.values()),
+            "friends_count": len(self.friends),
             "last_interaction": self.last_interaction,
         }
 
     def mood_text(self) -> str:
-        if self.happiness >= 85:
-            return "Счастлив и полон сил"
-        if self.happiness >= 65:
-            return "Доволен"
-        if self.happiness >= 40:
-            return "Нормально"
-        if self.hunger > 75:
-            return "Голоден и немного грустен"
+        if self.happiness >= 85: return "Счастлив и полон сил"
+        if self.happiness >= 65: return "Доволен"
+        if self.happiness >= 40: return "Нормально"
+        if self.hunger > 75: return "Голоден и немного грустен"
         return "Устал или скучает"
 
     def mood_emoji(self) -> str:
-        if self.happiness >= 80:
-            return "🥰"
-        if self.happiness >= 60:
-            return "😊"
-        if self.hunger > 70:
-            return "🥺"
-        if self.energy < 30:
-            return "😴"
+        if self.happiness >= 80: return "🥰"
+        if self.happiness >= 60: return "😊"
+        if self.hunger > 70: return "🥺"
+        if self.energy < 30: return "😴"
         return "😌"
 
     def strong_habits(self, threshold: float = 0.5) -> Dict[str, float]:
@@ -446,21 +544,21 @@ class DragonPet:
             return None
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        data.setdefault("level", 1)
-        data.setdefault("xp", 0)
-        data.setdefault("evolution_stage", 0)
-        data.setdefault("last_daily", "")
-        data.setdefault("inventory", {})
-        data.setdefault("last_search", "")
-        data.setdefault("last_hunt", "")
+        defaults = {
+            "level": 1, "xp": 0, "evolution_stage": 0, "last_daily": "",
+            "inventory": {}, "last_search": "", "last_hunt": "",
+            "coins": 50, "friends": {}, "last_play": "", "last_rings": "",
+        }
+        for k, v in defaults.items():
+            data.setdefault(k, v)
         return cls(**data)
 
     @classmethod
     def create(cls, owner_id: int, name: str = "Гроктар") -> "DragonPet":
         pet = cls(owner_id=owner_id, name=name)
-        # Стартовые предметы
         pet.add_item("meat", 2)
         pet.add_item("berry", 1)
+        pet.coins = 80
         pet.save()
         return pet
 
@@ -468,8 +566,7 @@ class DragonPet:
         self.last_interaction = datetime.now(timezone.utc).isoformat()
 
     def _strengthen(self, habit: str, amount: float) -> None:
-        current = self.habits.get(habit, 0.0)
-        self.habits[habit] = min(1.0, current + amount)
+        self.habits[habit] = min(1.0, self.habits.get(habit, 0.0) + amount)
 
     def _response(self, variants: list[str]) -> str:
         return random.choice(variants)
