@@ -1,17 +1,17 @@
 """
 Dragon Pet Discord Bot
 Добрый дракон с седлом — твой виртуальный питомец.
-Кнопки • Уровни • Ежедневные награды • Эволюция • Эмодзи
+Кнопки • Уровни • Инвентарь • Мини-игры • Эволюция
 """
 
 import os
 import discord
 from discord import app_commands
 from discord.ext import commands
-from discord.ui import View, Button, button
+from discord.ui import View, Button, button, Select
 from dotenv import load_dotenv
 
-from dragon import DragonPet
+from dragon import DragonPet, ITEMS, format_item
 
 load_dotenv()
 
@@ -46,7 +46,6 @@ def make_status_embed(pet: DragonPet) -> discord.Embed:
         color=0x9F1239,
     )
 
-    # XP прогресс
     xp_bar_len = 12
     xp_filled = int((data["xp"] / data["xp_needed"]) * xp_bar_len) if data["xp_needed"] else 0
     xp_bar = "█" * xp_filled + "░" * (xp_bar_len - xp_filled)
@@ -68,11 +67,18 @@ def make_status_embed(pet: DragonPet) -> discord.Embed:
         inline=False,
     )
 
+    inv_count = data.get("inventory_count", 0)
+    embed.add_field(
+        name="Инвентарь",
+        value=f"🎒 Предметов: **{inv_count}**  (смотри `/inventory`)",
+        inline=False,
+    )
+
     habits = data["habits"]
     if habits:
         habits_text = "\n".join(
             f"• {name} ({int(strength * 100)}%)"
-            for name, strength in list(habits.items())[:5]
+            for name, strength in list(habits.items())[:4]
         )
         embed.add_field(name="Сильные привычки", value=habits_text, inline=False)
 
@@ -87,12 +93,23 @@ def make_status_embed(pet: DragonPet) -> discord.Embed:
     else:
         embed.add_field(name="Эволюция", value="✨ Максимальная форма достигнута!", inline=False)
 
-    embed.set_footer(text="Добрый дракон с седлом всегда рядом 🔥 • Нажми кнопки ниже")
+    embed.set_footer(text="Добрый дракон с седлом всегда рядом 🔥 • Кнопки ниже")
+    return embed
+
+
+def make_inventory_embed(pet: DragonPet) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"🎒 Инвентарь — {pet.name}",
+        color=0x9F1239,
+    )
+    text = pet.inventory_text()
+    embed.description = text
+    embed.set_footer(text="Используй /use <предмет> чтобы применить")
     return embed
 
 
 def level_up_text(pet: DragonPet) -> str:
-    evo_msg = pet._check_evolution()  # на всякий случай ещё раз
+    evo_msg = pet._check_evolution()
     parts = [f"🎉 **Уровень {pet.level}!** {pet.name} стал сильнее!"]
     if evo_msg:
         parts.append(evo_msg)
@@ -102,8 +119,6 @@ def level_up_text(pet: DragonPet) -> str:
 # ====================== КНОПКИ ======================
 
 class DragonView(View):
-    """Красивые кнопки действий с драконом."""
-
     def __init__(self, owner_id: int, timeout: float = 180):
         super().__init__(timeout=timeout)
         self.owner_id = owner_id
@@ -124,14 +139,20 @@ class DragonView(View):
             return
 
         leveled = False
+        reply = ""
+
         if action == "feed":
             reply, leveled = pet.feed()
         elif action == "pet":
             reply, leveled = pet.pet()
         elif action == "fly":
             reply, leveled = pet.fly()
+        elif action == "search":
+            reply, leveled, _ = pet.search_stones()
+        elif action == "hunt":
+            reply, leveled, _ = pet.hunt()
         else:
-            reply, leveled = "Неизвестное действие", False
+            reply = "Неизвестное действие"
 
         pet.save()
 
@@ -142,44 +163,47 @@ class DragonView(View):
         embed = make_status_embed(pet)
         await interaction.response.edit_message(content=content, embed=embed, view=self)
 
-        # Эмодзи-реакции на сообщение
         try:
             msg = await interaction.original_response()
-            if action == "feed":
-                await msg.add_reaction("🍖")
-            elif action == "pet":
-                await msg.add_reaction("🥰")
-            elif action == "fly":
-                await msg.add_reaction("🔥")
+            reactions = {
+                "feed": "🍖", "pet": "🥰", "fly": "🔥",
+                "search": "🔍", "hunt": "🏹",
+            }
+            if action in reactions:
+                await msg.add_reaction(reactions[action])
             if leveled:
                 await msg.add_reaction("⭐")
                 await msg.add_reaction("✨")
         except Exception:
             pass
 
-    @button(label="Покормить", style=discord.ButtonStyle.success, emoji="🍖", custom_id="dragon_feed")
+    @button(label="Покормить", style=discord.ButtonStyle.success, emoji="🍖", row=0)
     async def feed_button(self, interaction: discord.Interaction, button: Button):
         await self._do_action(interaction, "feed")
 
-    @button(label="Почесать", style=discord.ButtonStyle.primary, emoji="🥰", custom_id="dragon_pet")
+    @button(label="Почесать", style=discord.ButtonStyle.primary, emoji="🥰", row=0)
     async def pet_button(self, interaction: discord.Interaction, button: Button):
         await self._do_action(interaction, "pet")
 
-    @button(label="Полететь", style=discord.ButtonStyle.danger, emoji="🔥", custom_id="dragon_fly")
+    @button(label="Полететь", style=discord.ButtonStyle.danger, emoji="🔥", row=0)
     async def fly_button(self, interaction: discord.Interaction, button: Button):
         await self._do_action(interaction, "fly")
 
-    @button(label="Статус", style=discord.ButtonStyle.secondary, emoji="📊", custom_id="dragon_status")
-    async def status_button(self, interaction: discord.Interaction, button: Button):
+    @button(label="Поиск камушков", style=discord.ButtonStyle.secondary, emoji="🔍", row=1)
+    async def search_button(self, interaction: discord.Interaction, button: Button):
+        await self._do_action(interaction, "search")
+
+    @button(label="Охота", style=discord.ButtonStyle.secondary, emoji="🏹", row=1)
+    async def hunt_button(self, interaction: discord.Interaction, button: Button):
+        await self._do_action(interaction, "hunt")
+
+    @button(label="Инвентарь", style=discord.ButtonStyle.secondary, emoji="🎒", row=1)
+    async def inv_button(self, interaction: discord.Interaction, button: Button):
         pet = DragonPet.load(self.owner_id)
         if not pet:
             await interaction.response.send_message("Дракон не найден.", ephemeral=True)
             return
-        await interaction.response.edit_message(
-            content=None,
-            embed=make_status_embed(pet),
-            view=self,
-        )
+        await interaction.response.send_message(embed=make_inventory_embed(pet), ephemeral=True)
 
 
 # ====================== КОМАНДЫ ======================
@@ -210,7 +234,8 @@ async def claim(interaction: discord.Interaction, name: str = "Гроктар"):
     embed.description = (
         f"*{pet.species}*\n\n"
         f"**{pet.name}** теперь твой!\n"
-        f"Он уже проверяет седло и ждёт, когда ты сядешь."
+        f"Он уже проверяет седло и ждёт, когда ты сядешь.\n"
+        f"В инвентаре уже есть немного еды 🍖"
     )
     view = DragonView(interaction.user.id)
     await interaction.response.send_message(
@@ -230,12 +255,8 @@ async def claim(interaction: discord.Interaction, name: str = "Гроктар"):
 async def status(interaction: discord.Interaction):
     pet = DragonPet.load(interaction.user.id)
     if not pet:
-        await interaction.response.send_message(
-            "У тебя ещё нет дракона. Используй `/claim`!",
-            ephemeral=True,
-        )
+        await interaction.response.send_message("У тебя ещё нет дракона. Используй `/claim`!", ephemeral=True)
         return
-
     view = DragonView(interaction.user.id)
     await interaction.response.send_message(embed=make_status_embed(pet), view=view)
 
@@ -246,24 +267,11 @@ async def feed(interaction: discord.Interaction):
     if not pet:
         await interaction.response.send_message("Сначала заведи дракона: `/claim`", ephemeral=True)
         return
-
     reply, leveled = pet.feed()
     pet.save()
-
-    content = reply
-    if leveled:
-        content += "\n\n" + level_up_text(pet)
-
+    content = reply + ("\n\n" + level_up_text(pet) if leveled else "")
     view = DragonView(interaction.user.id)
     await interaction.response.send_message(content=content, embed=make_status_embed(pet), view=view)
-
-    try:
-        msg = await interaction.original_response()
-        await msg.add_reaction("🍖")
-        if leveled:
-            await msg.add_reaction("⭐")
-    except Exception:
-        pass
 
 
 @bot.tree.command(name="pet", description="Почесать дракона за ушком")
@@ -272,24 +280,11 @@ async def pet_cmd(interaction: discord.Interaction):
     if not pet:
         await interaction.response.send_message("Сначала заведи дракона: `/claim`", ephemeral=True)
         return
-
     reply, leveled = pet.pet()
     pet.save()
-
-    content = reply
-    if leveled:
-        content += "\n\n" + level_up_text(pet)
-
+    content = reply + ("\n\n" + level_up_text(pet) if leveled else "")
     view = DragonView(interaction.user.id)
     await interaction.response.send_message(content=content, embed=make_status_embed(pet), view=view)
-
-    try:
-        msg = await interaction.original_response()
-        await msg.add_reaction("🥰")
-        if leveled:
-            await msg.add_reaction("⭐")
-    except Exception:
-        pass
 
 
 @bot.tree.command(name="fly", description="Сесть в седло и полетать")
@@ -298,25 +293,11 @@ async def fly(interaction: discord.Interaction):
     if not pet:
         await interaction.response.send_message("Сначала заведи дракона: `/claim`", ephemeral=True)
         return
-
     reply, leveled = pet.fly()
     pet.save()
-
-    content = reply
-    if leveled:
-        content += "\n\n" + level_up_text(pet)
-
+    content = reply + ("\n\n" + level_up_text(pet) if leveled else "")
     view = DragonView(interaction.user.id)
     await interaction.response.send_message(content=content, embed=make_status_embed(pet), view=view)
-
-    try:
-        msg = await interaction.original_response()
-        await msg.add_reaction("🔥")
-        if leveled:
-            await msg.add_reaction("⭐")
-            await msg.add_reaction("✨")
-    except Exception:
-        pass
 
 
 @bot.tree.command(name="talk", description="Поговорить с драконом")
@@ -326,50 +307,106 @@ async def talk(interaction: discord.Interaction, message: str = "Привет"):
     if not pet:
         await interaction.response.send_message("Сначала заведи дракона: `/claim`", ephemeral=True)
         return
-
     reply, leveled = pet.talk(message)
     pet.save()
-
     content = f"**Ты:** {message}\n**{pet.name}:** {reply}"
     if leveled:
         content += "\n\n" + level_up_text(pet)
-
     await interaction.response.send_message(content)
+
+
+@bot.tree.command(name="daily", description="Получить ежедневную награду")
+async def daily(interaction: discord.Interaction):
+    pet = DragonPet.load(interaction.user.id)
+    if not pet:
+        await interaction.response.send_message("Сначала заведи дракона: `/claim`", ephemeral=True)
+        return
+    text, leveled, _ = pet.claim_daily()
+    pet.save()
+    content = text + ("\n\n" + level_up_text(pet) if leveled else "")
+    view = DragonView(interaction.user.id)
+    await interaction.response.send_message(content=content, embed=make_status_embed(pet), view=view)
+
+
+@bot.tree.command(name="inventory", description="Посмотреть инвентарь дракона")
+async def inventory(interaction: discord.Interaction):
+    pet = DragonPet.load(interaction.user.id)
+    if not pet:
+        await interaction.response.send_message("Сначала заведи дракона: `/claim`", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=make_inventory_embed(pet))
+
+
+@bot.tree.command(name="use", description="Использовать / подарить предмет из инвентаря")
+@app_commands.describe(item="ID предмета (meat, fish, berry, shiny_stone, saddle_oil...)")
+async def use_item(interaction: discord.Interaction, item: str):
+    pet = DragonPet.load(interaction.user.id)
+    if not pet:
+        await interaction.response.send_message("Сначала заведи дракона: `/claim`", ephemeral=True)
+        return
+
+    item = item.lower().strip()
+    reply, leveled = pet.use_item(item)
+    pet.save()
+
+    content = reply
+    if leveled:
+        content += "\n\n" + level_up_text(pet)
+
+    view = DragonView(interaction.user.id)
+    await interaction.response.send_message(content=content, embed=make_status_embed(pet), view=view)
+
+
+@bot.tree.command(name="search", description="Мини-игра: поиск блестящих камушков")
+async def search(interaction: discord.Interaction):
+    pet = DragonPet.load(interaction.user.id)
+    if not pet:
+        await interaction.response.send_message("Сначала заведи дракона: `/claim`", ephemeral=True)
+        return
+
+    reply, leveled, found = pet.search_stones()
+    pet.save()
+
+    content = reply
+    if leveled:
+        content += "\n\n" + level_up_text(pet)
+
+    view = DragonView(interaction.user.id)
+    await interaction.response.send_message(content=content, embed=make_status_embed(pet), view=view)
 
     try:
         msg = await interaction.original_response()
-        await msg.add_reaction("💬")
+        await msg.add_reaction("🔍")
+        if found:
+            await msg.add_reaction("💎")
         if leveled:
             await msg.add_reaction("⭐")
     except Exception:
         pass
 
 
-@bot.tree.command(name="daily", description="Получить ежедневную награду для дракона")
-async def daily(interaction: discord.Interaction):
+@bot.tree.command(name="hunt", description="Мини-игра: охота за едой и ресурсами")
+async def hunt(interaction: discord.Interaction):
     pet = DragonPet.load(interaction.user.id)
     if not pet:
         await interaction.response.send_message("Сначала заведи дракона: `/claim`", ephemeral=True)
         return
 
-    text, leveled, bonuses = pet.claim_daily()
+    reply, leveled, found = pet.hunt()
     pet.save()
 
-    content = text
+    content = reply
     if leveled:
         content += "\n\n" + level_up_text(pet)
 
     view = DragonView(interaction.user.id)
-    await interaction.response.send_message(
-        content=content,
-        embed=make_status_embed(pet),
-        view=view,
-    )
+    await interaction.response.send_message(content=content, embed=make_status_embed(pet), view=view)
 
     try:
         msg = await interaction.original_response()
-        await msg.add_reaction("🎁")
-        await msg.add_reaction("✨")
+        await msg.add_reaction("🏹")
+        if found:
+            await msg.add_reaction("🍖")
         if leveled:
             await msg.add_reaction("⭐")
     except Exception:
